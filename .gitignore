@@ -12,3 +12,7 @@ dist/
 build/
 .env
 
+# .gitignore
+*.sqlite
+*.db
+*.db-journal
