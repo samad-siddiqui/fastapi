@@ -1,4 +1,8 @@
-from fastapi import FastAPI, HTTPException, Depends
+from fastapi import FastAPI, HTTPException, Depends, status
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from jose import JWTError, jwt
+from passlib.context import CryptContext
+# from fastapi import Cookie, Header
 from fastapi import UploadFile, File, Form
 from models import (GenreUrl,
                     Band,
@@ -7,10 +11,13 @@ from models import (GenreUrl,
                     Task,
                     Profile,
                     ProfileRegister,
-                    Feedback)
+                    Feedback, 
+                    TokenData,
+                    Token
+                    )
 from sqlmodel import Session
 # from uuid import UUID
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pydantic import EmailStr
 
 from typing import Optional
@@ -27,7 +34,106 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan)
 
 
-@app.post("/bands")
+SECRET_KEY = "dce4d19d2a17f450b3b2544d736581217ba561896c4df4f0782e47094ec45898"
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 30
+
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+oauth_2_scheme = OAuth2PasswordBearer(tokenUrl="token")
+
+
+def hash_password(password: str):
+    return pwd_context.hash(password)
+
+
+# @app.get("/headers/")
+# async def read_headers(user_agent: str = Header(None)):
+#     return {"User-Agent": user_agent}
+
+
+# @app.get("/cookies/")
+# async def read_cookie(session_id: str = Cookie(None)):
+#     return {"Session-ID": session_id}
+def verify_password(plain_password, password):
+    return pwd_context.verify(plain_password, password)
+
+
+def get_user(email: str, session: Session = Depends(get_session)):
+    return session.exec(select(Profile).where(Profile.email == email)).first()
+
+
+def authenticate_user(email: str, password: str,
+                      session: Session = Depends(get_session)):
+    user = get_user(email, session)
+    if not user:
+        return False
+    if not verify_password(password, user.password):
+        return False
+    return user
+
+
+def create_access_token(data: dict, expires_delta: timedelta | None = None):
+    to_encode = data.copy()
+    expire = datetime.now(timezone.utc) \
+        + (expires_delta or timedelta(minutes=15))
+    to_encode.update({"exp": expire})
+    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+    return encoded_jwt
+
+
+async def get_current_user(token: str = Depends(oauth_2_scheme), 
+                           session: Session = Depends(get_session)):
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"}
+    )
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        email: str = payload.get("sub")
+        if email is None:
+            raise credentials_exception
+        token_data = TokenData(email=email)
+    except JWTError:
+        raise credentials_exception
+
+    user = get_user(email=token_data.email, session=session)
+    if user is None:
+        raise credentials_exception
+    return user
+
+
+async def get_current_active_user(
+        current_user: Profile = Depends(get_current_user)
+        ):
+    if current_user.disabled:
+        raise HTTPException(status_code=400, detail="Inactive user")
+    return current_user
+
+
+@app.post("/token", response_model=Token)
+async def login_for_access_token(
+    form_data: OAuth2PasswordRequestForm = Depends(),
+    session: Session = Depends(get_session)
+):
+    user = authenticate_user(form_data.username, form_data.password, session)
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect username or password",
+            headers={"WWW-Authenticate": "Bearer"}
+        )
+    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    access_token = create_access_token(
+        data={"sub": user.email}, expires_delta=access_token_expires
+    )
+    return {"access_token": access_token, "token_type": "bearer"}
+
+
+auth_required = Depends(get_current_user)
+
+
+@app.post("/bands", dependencies=[auth_required])
 async def create_band(
     band: BandCreate,
     session: Session = Depends(get_session)
@@ -43,13 +149,12 @@ async def create_band(
             )
             session.add(album_obj)
             # session.commit()
-    session.add(band)
     session.commit()
     session.refresh(band)
     return band
 
 
-@app.get("/bands/{band_id}")
+@app.get("/bands/{band_id}", dependencies=[auth_required])
 async def get_band(band_id: int, session: Session = Depends(get_session)):
 
     band = session.get(Band, band_id)
@@ -58,7 +163,7 @@ async def get_band(band_id: int, session: Session = Depends(get_session)):
     return band
 
 
-@app.get("/bands")
+@app.get("/bands", dependencies=[auth_required])
 async def get_bands(genre: GenreUrl | None = None,
                     has_albums: bool = False,
                     session: Session = Depends(get_session)):
@@ -74,8 +179,8 @@ async def get_bands(genre: GenreUrl | None = None,
     return band_list
 
 
-@app.post("/tasks")
-async def get_task(
+@app.post("/tasks", dependencies=[auth_required])
+async def create_task(
     task: Task,
     session: Session = Depends(get_session)
 ):
@@ -86,7 +191,7 @@ async def get_task(
     return task
 
 
-@app.get("/tasks")
+@app.get("/tasks", dependencies=[auth_required])
 async def get_tasks(
     completed: Optional[bool] = None,
     session: Session = Depends(get_session)
@@ -100,7 +205,7 @@ async def get_tasks(
         return session.exec(select(Task)).all()
 
 
-@app.get("/tasks/{task_id}")
+@app.get("/tasks/{task_id}", dependencies=[auth_required])
 async def get_tasks_id(
     task_id: int,
     session: Session = Depends(get_session)
@@ -118,7 +223,7 @@ async def create_profile(
 ):
     profile = Profile(name=profile_data.name,
                       email=profile_data.email,
-                      password=profile_data.password,
+                      password=hash_password(profile_data.password),
                       )
 
     session.add(profile)
@@ -127,7 +232,7 @@ async def create_profile(
     return profile
 
 
-@app.get("/profiles")
+@app.get("/profiles", dependencies=[auth_required])
 async def get_profiles(
     session: Session = Depends(get_session)
 ):
@@ -135,7 +240,7 @@ async def get_profiles(
     return profiles
 
 
-@app.get("/profiles/{profile_id}")
+@app.get("/profiles/{profile_id}", dependencies=[auth_required])
 async def get_profile(
     profile_id: int,
     session: Session = Depends(get_session)
@@ -146,7 +251,7 @@ async def get_profile(
     return profile
 
 
-@app.post("/feedback")
+@app.post("/feedback", dependencies=[auth_required])
 async def create_feedback(
     email: EmailStr = Form(...),
     message: str = Form(...),
@@ -163,7 +268,7 @@ async def create_feedback(
         email=email,
         message=message,
         user_id=user_id,
-        file_path = file_path,
+        file_path=file_path,
         timestamp=datetime.now(timezone.utc)
     )
 
@@ -173,7 +278,7 @@ async def create_feedback(
     return feedback
 
 
-@app.get("/feedback")
+@app.get("/feedback", dependencies=[auth_required])
 async def get_feedback(
     session: Session = Depends(get_session)
 ):
@@ -181,7 +286,7 @@ async def get_feedback(
     return feedback
 
 
-@app.get("/feedback/{feedback_id}")
+@app.get("/feedback/{feedback_id}", dependencies=[auth_required])
 async def get_feedback_id(
     feedback_id: int,
     session: Session = Depends(get_session)

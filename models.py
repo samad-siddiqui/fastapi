@@ -1,6 +1,11 @@
 from datetime import date, datetime, timezone
 from enum import Enum
-from pydantic import field_validator, EmailStr, model_validator
+from pydantic import (
+    field_validator,
+    EmailStr,
+    model_validator,
+    BaseModel
+)
 from sqlmodel import SQLModel, Field, Relationship
 
 
@@ -69,6 +74,7 @@ class ProfileBase(SQLModel):
     name: str
     email: EmailStr
     password: str
+    disabled: bool = False
 
 
 class Profile(ProfileBase, table=True):
@@ -110,3 +116,13 @@ class FeedbackBase(SQLModel):
 class Feedback(FeedbackBase, table=True):
     id: int = Field(default=None, primary_key=True)
     profile: Profile = Relationship(back_populates="feedbacks")
+
+
+class Token(BaseModel):
+    access_token: str
+    token_type: str
+
+
+class TokenData(BaseModel):
+    # username: str | None = None
+    email: EmailStr | None = None
